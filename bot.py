@@ -1,6 +1,4 @@
-import os
-import logging
-import asyncio
+import os, logging, asyncio
 from datetime import datetime
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,50 +9,40 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
-ADMIN_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
+ANTHROPIC_KEY  = os.environ["ANTHROPIC_API_KEY"]
+ADMIN_USER_ID  = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 
-# Use /data/ for persistent storage on Railway volumes
-DB_PATH = os.environ.get("DB_PATH", "/data/bd_bot.db")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+db = Database(os.environ.get("DB_PATH", "bd_bot.db"))
 
-db = Database(DB_PATH)
-
-def get_claude():
-    return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
+def claude(): return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 def is_admin(uid): return uid == ADMIN_USER_ID
-
 def admin_only(fn):
-    async def wrapper(update, ctx):
+    async def w(update, ctx):
         if not is_admin(update.effective_user.id): return
         return await fn(update, ctx)
-    return wrapper
+    return w
 
 async def handle_group_message(update, ctx):
-    msg = update.effective_message
+    msg  = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
     if not db.is_permitted_chat(chat.id): return
     db.log_message(
         chat_id=chat.id, chat_name=chat.title or str(chat.id),
         user_id=user.id if user else 0,
-        username=user.username or user.full_name if user else "unknown",
+        username=(user.username or user.full_name) if user else "unknown",
         text=msg.text or msg.caption or "",
         msg_id=msg.message_id, timestamp=datetime.utcnow().isoformat()
     )
+    log.info(f"Logged message from {chat.title} ({chat.id})")
 
 async def bot_added_to_group(update, ctx):
-    """Auto-permit every group the bot is added to and notify admin."""
     chat = update.effective_chat
-    # Auto-permit this chat immediately
     db.permit_chat(chat.id, chat.title or str(chat.id))
-    log.info(f"Auto-permitted chat: {chat.title} ({chat.id})")
+    log.info(f"Auto-permitted: {chat.title} ({chat.id})")
     try:
-        await ctx.bot.send_message(
-            chat_id=ADMIN_USER_ID,
-            text=f"Bot added to and now tracking:\n{chat.title}\nID: {chat.id}"
-        )
+        await ctx.bot.send_message(chat_id=ADMIN_USER_ID,
+            text=f"Now tracking: {chat.title}\nID: {chat.id}")
     except Exception as e:
         log.error(f"Could not notify admin: {e}")
 
@@ -62,24 +50,22 @@ async def bot_added_to_group(update, ctx):
 async def cmd_start(update, ctx):
     await update.message.reply_text(
         "Soneium BD Intelligence Bot\n\n"
-        "/chats - list tracked chats\n"
-        "/summary <id> - summarise a chat\n"
-        "/status <name> - BD status of an account\n"
-        "/query <q> - search all chats\n"
-        "/broadcast - send to selected chats\n\n"
-        "Or just type any question!")
+        "/chats - list all tracked chats\n"
+        "/summary <chat_id> - full summary of a chat\n"
+        "/status <name> - BD status of any account\n"
+        "/query <question> - search across all chats\n"
+        "/broadcast - send a message to selected chats\n\n"
+        "Or just type any question naturally!")
 
 @admin_only
 async def cmd_permit(update, ctx):
     if not ctx.args: await update.message.reply_text("Usage: /permit <chat_id>"); return
-    chat_id = int(ctx.args[0])
-    chat_name = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else str(chat_id)
-    try:
-        obj = await ctx.bot.get_chat(chat_id)
-        chat_name = obj.title or chat_name
+    cid = int(ctx.args[0])
+    name = " ".join(ctx.args[1:]) or str(cid)
+    try: obj = await ctx.bot.get_chat(cid); name = obj.title or name
     except: pass
-    db.permit_chat(chat_id, chat_name)
-    await update.message.reply_text(f"Now tracking: {chat_name} ({chat_id})")
+    db.permit_chat(cid, name)
+    await update.message.reply_text(f"Now tracking: {name} ({cid})")
 
 @admin_only
 async def cmd_unpermit(update, ctx):
@@ -90,8 +76,7 @@ async def cmd_unpermit(update, ctx):
 @admin_only
 async def cmd_chats(update, ctx):
     chats = db.get_permitted_chats()
-    if not chats:
-        await update.message.reply_text("No chats tracked yet. Add me to a group and I will auto-track it."); return
+    if not chats: await update.message.reply_text("No chats tracked yet."); return
     lines = [f"Tracked chats ({len(chats)}):"]
     for c in chats:
         lines.append(f"- {c['chat_name']} ({c['chat_id']}) - {db.get_message_count(c['chat_id'])} msgs")
@@ -100,13 +85,13 @@ async def cmd_chats(update, ctx):
 @admin_only
 async def cmd_summary(update, ctx):
     if not ctx.args: await update.message.reply_text("Usage: /summary <chat_id>"); return
-    chat_id = int(ctx.args[0])
-    if not db.is_permitted_chat(chat_id): await update.message.reply_text("Not tracked."); return
+    cid = int(ctx.args[0])
+    if not db.is_permitted_chat(cid): await update.message.reply_text("Chat not tracked."); return
     t = await update.message.reply_text("Analysing...")
-    msgs = db.get_messages(chat_id, limit=500)
-    if not msgs: await t.edit_text("No messages logged yet in this chat."); return
-    ans = await ask_chat(msgs, db.get_chat_name(chat_id), "Give a comprehensive BD status summary.")
-    await t.edit_text(f"Summary: {db.get_chat_name(chat_id)}\n\n{ans}")
+    msgs = db.get_messages(cid, limit=500)
+    if not msgs: await t.edit_text("No messages logged yet for this chat."); return
+    ans = await ai_chat(msgs, db.get_chat_name(cid), "Give a comprehensive BD status summary of all discussions.")
+    await t.edit_text(f"Summary: {db.get_chat_name(cid)}\n\n{ans}")
 
 @admin_only
 async def cmd_status(update, ctx):
@@ -114,9 +99,9 @@ async def cmd_status(update, ctx):
     name = " ".join(ctx.args)
     t = await update.message.reply_text(f"Searching for {name}...")
     results = db.search_messages_across_chats(name, limit=200)
-    if not results: await t.edit_text(f"Nothing found for {name}."); return
-    ans = await ask_cross(results, f"What is the current BD status for {name}? Include which chats.")
-    await t.edit_text(f"Account: {name}\n\n{ans}")
+    if not results: await t.edit_text(f"Nothing found mentioning {name}."); return
+    ans = await ai_cross(results, f"What is the current BD status for {name}? Summarise all context.")
+    await t.edit_text(f"Status: {name}\n\n{ans}")
 
 @admin_only
 async def cmd_query(update, ctx):
@@ -131,10 +116,14 @@ async def handle_private_message(update, ctx):
 
 async def _query(update, q):
     t = await update.message.reply_text("Searching your BD chats...")
+    # First try targeted search
     results = db.search_messages_across_chats(q, limit=300)
+    # If nothing found, fall back to all recent messages so AI has context
     if not results:
-        await t.edit_text("No messages found yet. Make sure the bot is in your group chats - it auto-tracks any group it is added to."); return
-    ans = await ask_cross(results, q)
+        results = db.get_all_messages(limit=300)
+    if not results:
+        await t.edit_text("No messages logged yet. Send some messages in your tracked group chats first."); return
+    ans = await ai_cross(results, q)
     await t.edit_text(f"Answer\n\n{ans}")
 
 broadcast_state = {}
@@ -142,7 +131,7 @@ broadcast_state = {}
 @admin_only
 async def cmd_broadcast(update, ctx):
     broadcast_state[ADMIN_USER_ID] = {"step": "awaiting_message"}
-    await update.message.reply_text("Broadcast Wizard - Step 1/3: Type your message.")
+    await update.message.reply_text("Broadcast Wizard\nStep 1/3: Type your message.")
 
 async def handle_broadcast_steps(update, ctx):
     if update.effective_user.id != ADMIN_USER_ID: return
@@ -151,7 +140,7 @@ async def handle_broadcast_steps(update, ctx):
     text = update.message.text.strip()
     if state["step"] == "awaiting_message":
         state.update({"message": text, "step": "awaiting_time"})
-        await update.message.reply_text("Step 2/3: When? Type 'now' or '2024-01-15 14:30' (UTC).")
+        await update.message.reply_text("Step 2/3: Send time? Type 'now' or '2024-01-15 14:30' (UTC).")
     elif state["step"] == "awaiting_time":
         try:
             state["send_at"] = None if text.lower() == "now" else datetime.strptime(text, "%Y-%m-%d %H:%M")
@@ -166,22 +155,22 @@ async def handle_broadcast_steps(update, ctx):
 
 def _kbd(chats, sel):
     rows = [[InlineKeyboardButton(
-        ("ok " if c["chat_id"] in sel else "   ") + c["chat_name"][:28],
-        callback_data=f"bc_toggle:{c['chat_id']}")] for c in chats]
+        ("✅ " if c["chat_id"] in sel else "⬜ ") + c["chat_name"][:28],
+        callback_data=f"bc:{c['chat_id']}")] for c in chats]
     rows += [[InlineKeyboardButton("Select All", callback_data="bc_all"),
-              InlineKeyboardButton("Send Now", callback_data="bc_send")],
+              InlineKeyboardButton("🚀 Send", callback_data="bc_send")],
              [InlineKeyboardButton("Cancel", callback_data="bc_cancel")]]
     return InlineKeyboardMarkup(rows)
 
-async def handle_broadcast_callback(update, ctx):
+async def handle_broadcast_cb(update, ctx):
     q = update.callback_query; await q.answer()
     if not is_admin(q.from_user.id): return
     state = broadcast_state.get(ADMIN_USER_ID, {})
     if not state: await q.edit_message_text("Expired. Use /broadcast."); return
     chats = db.get_permitted_chats()
-    sel = state.get("selected_chats", [])
-    if q.data.startswith("bc_toggle:"):
-        cid = int(q.data.split(":")[1])
+    sel   = state.get("selected_chats", [])
+    if q.data.startswith("bc:"):
+        cid = int(q.data[3:])
         sel.remove(cid) if cid in sel else sel.append(cid)
         state["selected_chats"] = sel
         await q.edit_message_reply_markup(reply_markup=_kbd(chats, sel))
@@ -189,11 +178,8 @@ async def handle_broadcast_callback(update, ctx):
         state["selected_chats"] = [c["chat_id"] for c in chats]
         await q.edit_message_reply_markup(reply_markup=_kbd(chats, state["selected_chats"]))
     elif q.data == "bc_send":
-        if not sel:
-            await q.edit_message_text("No chats selected.")
-            broadcast_state.pop(ADMIN_USER_ID, None); return
-        msg = state["message"]
-        send_at = state.get("send_at")
+        if not sel: await q.edit_message_text("No chats selected."); broadcast_state.pop(ADMIN_USER_ID, None); return
+        msg = state["message"]; send_at = state.get("send_at")
         if send_at:
             delay = (send_at - datetime.utcnow()).total_seconds()
             if delay > 0:
@@ -202,45 +188,46 @@ async def handle_broadcast_callback(update, ctx):
         ok = fail = 0
         for cid in sel:
             try: await ctx.bot.send_message(chat_id=cid, text=msg); ok += 1
-            except Exception as e: log.error(f"Fail {cid}: {e}"); fail += 1
+            except Exception as e: log.error(f"Broadcast fail {cid}: {e}"); fail += 1
         try: await q.edit_message_text(f"Done! Sent: {ok} | Failed: {fail}")
         except: await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"Done! Sent: {ok} | Failed: {fail}")
         broadcast_state.pop(ADMIN_USER_ID, None)
     elif q.data == "bc_cancel":
-        broadcast_state.pop(ADMIN_USER_ID, None)
-        await q.edit_message_text("Cancelled.")
+        broadcast_state.pop(ADMIN_USER_ID, None); await q.edit_message_text("Cancelled.")
 
-async def ask_chat(messages, chat_name, question):
-    ctx_txt = "\n".join(f"[{m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in messages if m["text"])
-    client = get_claude()
-    r = client.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
-        f"You are a BD intelligence assistant for Soneium. Chat: {chat_name}.\n\nHistory:\n{ctx_txt}\n\nQuestion: {question}\n\nAnswer concisely."}])
+async def ai_chat(messages, chat_name, question):
+    ctx = "\n".join(f"[{m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in messages if m["text"])
+    r = claude().messages.create(model="claude-opus-4-5", max_tokens=1024,
+        messages=[{"role":"user","content":
+            f"You are a BD intelligence assistant for Soneium. Chat: {chat_name}.\n\nHistory:\n{ctx}\n\nQuestion: {question}\n\nAnswer concisely based on the chat history."}])
     return r.content[0].text
 
-async def ask_cross(results, question):
-    ctx_txt = "\n".join(f"[{m['chat_name']} | {m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in results)
-    client = get_claude()
-    r = client.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
-        f"You are a BD intelligence assistant for Soneium.\n\nMessages:\n{ctx_txt}\n\nQuestion: {question}\n\nAnswer concisely, note which chat each piece of info came from."}])
+async def ai_cross(results, question):
+    ctx = "\n".join(f"[{m['chat_name']} | {m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in results if m["text"])
+    r = claude().messages.create(model="claude-opus-4-5", max_tokens=1024,
+        messages=[{"role":"user","content":
+            f"You are a BD intelligence assistant for Soneium.\n\nMessages from BD chats:\n{ctx}\n\nQuestion: {question}\n\nAnswer concisely. Note which chat each piece of info came from."}])
     return r.content[0].text
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, handle_group_message))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot_added_to_group))
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("permit", cmd_permit))
-    app.add_handler(CommandHandler("unpermit", cmd_unpermit))
-    app.add_handler(CommandHandler("chats", cmd_chats))
-    app.add_handler(CommandHandler("summary", cmd_summary))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("query", cmd_query))
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("permit",    cmd_permit))
+    app.add_handler(CommandHandler("unpermit",  cmd_unpermit))
+    app.add_handler(CommandHandler("chats",     cmd_chats))
+    app.add_handler(CommandHandler("summary",   cmd_summary))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("query",     cmd_query))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND,
-        lambda u, c: handle_broadcast_steps(u, c)
-        if broadcast_state.get(ADMIN_USER_ID, {}).get("step") in ("awaiting_message", "awaiting_time")
-        else handle_private_message(u, c)))
-    app.add_handler(CallbackQueryHandler(handle_broadcast_callback, pattern="^bc_"))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        lambda u,c: handle_broadcast_steps(u,c)
+        if broadcast_state.get(ADMIN_USER_ID,{}).get("step") in ("awaiting_message","awaiting_time")
+        else handle_private_message(u,c)
+    ))
+    app.add_handler(CallbackQueryHandler(handle_broadcast_cb, pattern="^bc"))
     log.info("Soneium BD Bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
