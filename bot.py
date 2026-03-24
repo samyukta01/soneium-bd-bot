@@ -15,7 +15,9 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 ADMIN_USER_ID = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 
 db = Database("bd_bot.db")
-claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+def get_claude():
+    return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 def is_admin(uid): return uid == ADMIN_USER_ID
 
@@ -86,7 +88,7 @@ async def cmd_summary(update, ctx):
 
 @admin_only
 async def cmd_status(update, ctx):
-    if not ctx.args: await update.message.reply_text("Usage: /status <name>"); return
+    if not ctx.args: await update.message.reply_text("Usage: /status <n>"); return
     name = " ".join(ctx.args)
     t = await update.message.reply_text(f"Searching for {name}...")
     results = db.search_messages_across_chats(name, limit=200)
@@ -173,14 +175,16 @@ async def handle_broadcast_callback(update, ctx):
 
 async def ask_chat(messages, chat_name, question):
     ctx_txt = "\n".join(f"[{m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in messages if m["text"])
-    r = claude.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
+    client = get_claude()
+    r = client.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
         f"You are a BD intelligence assistant for Soneium. Chat: {chat_name}.\n\nHistory:\n{ctx_txt}\n\nQuestion: {question}\n\nAnswer concisely."}])
     return r.content[0].text
 
 async def ask_cross(results, question):
     if not results: return "No relevant messages found."
     ctx_txt = "\n".join(f"[{m['chat_name']} | {m['timestamp'][:16]}] {m['username']}: {m['text']}" for m in results)
-    r = claude.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
+    client = get_claude()
+    r = client.messages.create(model="claude-opus-4-5", max_tokens=1024, messages=[{"role":"user","content":
         f"You are a BD intelligence assistant for Soneium.\n\nMessages:\n{ctx_txt}\n\nQuestion: {question}\n\nAnswer concisely, include chat sources."}])
     return r.content[0].text
 
